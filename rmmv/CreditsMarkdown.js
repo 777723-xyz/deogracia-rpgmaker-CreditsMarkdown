@@ -1,12 +1,12 @@
 /*:
- * @plugindesc v1.1.0 [MV] Affiche les crédits (Markdown) multilingues avec défilement, image de fond et menu titre.
+ * @plugindesc v1.3.0 [MV] Affiche les crédits (Markdown) multilingues avec détection auto (DKTools).
  * @author Gemini / DeoGracia
  *
  * @param --- Fichiers ---
  *
  * @param Default Language
- * @desc Code langue par défaut si la traduction manque (ex: en, fr).
- * @default en
+ * @desc Code langue par défaut si aucune traduction n'est trouvée (ex: en, fr).
+ * @default fr
  *
  * @param Background Image
  * @desc Nom de l'image dans img/pictures/ (sans l'extension).
@@ -45,12 +45,30 @@
  * ============================================================================
  * HISTORIQUE DES VERSIONS / CHANGELOG
  * ============================================================================
+ * 2026-01-09 v1.3.0 :
+ *   - Ajout de la compatibilité automatique avec DKTools Localization.
+ * 2026-01-08 v1.2.0 :
+ *   - Ajout de MarkdownLib.js
+ *   - réecriture pour utiliser une window au lieu d'un sprite (gère nativement
+ *     les codes texte)
  * 2026-01-07 v1.1.0 :
  *   - Ajout de la selection du BGM
  * 2026-01-07 v1.0.0 :
  *   - Création initiale du plugin
  * ============================================================================
+ * CREDITS MARKDOWN SCROLL
+ * ============================================================================
+ * Affiche un texte défilant lu depuis des fichiers Markdown externes.
+ * Nécessite la librairie 'MarkdownLib.js' dans js/libs/.
  *
+ * Ce plugin cherche la valeur de la locale dans cet ordre de priorité pour la langue :
+ * 1. La locale de DKTools (si le plugin est installé).
+ * 2. La variable 'language' du ConfigManager (si vous l'avez définie).
+ * 3. Le paramètre 'Default Language' de ce plugin.
+ *
+ * --- Structure des dossiers ---
+ * Placez vos fichiers crédits dans : data/credits/
+ * Nommez-les par code langue : credits_fr.md, credits_en.md, credits_es.md...
  * ============================================================================
  * INSTRUCTIONS
  * ============================================================================
@@ -74,28 +92,38 @@
  * de l'ordinateur du joueur.
  *
  * ============================================================================
+ * COMMANDES DE SCRIPT
+ * ============================================================================
+ * * SceneManager.push(Scene_Credits);
+ * ============================================================================
  */
 
 (function() {
-    const parameters = PluginManager.parameters('CreditsMarkdown');
-    const defaultLang = String(parameters['Default Language'] || 'en');
-    const bgImageName = String(parameters['Background Image'] || 'credits_bg');
-    const scrollSpeed = Number(parameters['Scroll Speed'] || 1);
-    const addToTitle = String(parameters['Add To Title']) === 'true';
-	const bgmName = String(parameters['BGM Name'] || '');
-    const bgmVolume = Number(parameters['BGM Volume'] || 90);
-    const bgmPitch = Number(parameters['BGM Pitch'] || 100);
-    const titleCommandName = String(parameters['Title Command Name'] || 'Crédits');
+    'use strict';
 
-    // --- INTEGRATION AU MENU TITRE ---
+    var parameters = PluginManager.parameters('CreditsMarkdown');
+    var defaultLang = parameters['Default Language'] || 'fr';
+    var bgImageName = parameters['Background Image'] || '';
+    var addToTitle = (parameters['Add To Title'] === 'true');
+    var titleCommandName = parameters['Title Command Name'] || 'Crédits';
+    var scrollSpeed = Number(parameters['Scroll Speed']) || 1;
+    
+    // Paramètres Audio
+    var bgmName = parameters['BGM Name'] || '';
+    var bgmVolume = Number(parameters['BGM Volume']) || 90;
+    var bgmPitch = Number(parameters['BGM Pitch']) || 100;
+
+    //-----------------------------------------------------------------------------
+    // Modification du Menu Titre
+    //-----------------------------------------------------------------------------
     if (addToTitle) {
-        const _Window_TitleCommand_makeCommandList = Window_TitleCommand.prototype.makeCommandList;
+        var _Window_TitleCommand_makeCommandList = Window_TitleCommand.prototype.makeCommandList;
         Window_TitleCommand.prototype.makeCommandList = function() {
             _Window_TitleCommand_makeCommandList.call(this);
             this.addCommand(titleCommandName, 'credits');
         };
 
-        const _Scene_Title_createCommandWindow = Scene_Title.prototype.createCommandWindow;
+        var _Scene_Title_createCommandWindow = Scene_Title.prototype.createCommandWindow;
         Scene_Title.prototype.createCommandWindow = function() {
             _Scene_Title_createCommandWindow.call(this);
             this._commandWindow.setHandler('credits', this.commandCredits.bind(this));
@@ -107,7 +135,9 @@
         };
     }
 
-    // --- CLASSE SCENE_CREDITS ---
+    //-----------------------------------------------------------------------------
+    // Scene_Credits
+    //-----------------------------------------------------------------------------
     function Scene_Credits() {
         this.initialize.apply(this, arguments);
     }
@@ -118,129 +148,134 @@
     Scene_Credits.prototype.initialize = function() {
         Scene_Base.prototype.initialize.call(this);
         this._textLoaded = false;
+        this._scrollWindow = null;
     };
 
-	Scene_Credits.prototype.create = function() {
+    Scene_Credits.prototype.create = function() {
         Scene_Base.prototype.create.call(this);
         this.createBackground();
-        this.createScrollContainer();
-        this.loadMarkdown();
-        this.playCreditsBgm(); // Appel de la nouvelle fonction
-    };
-
-    Scene_Credits.prototype.playCreditsBgm = function() {
-        if (bgmName && bgmName.trim() !== "") {
-            const bgm = {
-                name: bgmName,
-                volume: bgmVolume,
-                pitch: bgmPitch,
-                pan: 0
-            };
-            AudioManager.playBgm(bgm);
-        } else {
-            // Si aucun nom n'est renseigné, on peut choisir de couper la musique actuelle
-            AudioManager.stopBgm();
-        }
+        this.createScrollWindow();
+        this.loadCreditsText();
+        this.playCreditsMusic();
     };
 
     Scene_Credits.prototype.createBackground = function() {
         this._backSprite = new Sprite();
-        this._backSprite.bitmap = ImageManager.loadPicture(bgImageName);
+        if (bgImageName) {
+            this._backSprite.bitmap = ImageManager.loadPicture(bgImageName);
+        } else {
+            // Fond noir par défaut si pas d'image
+            this._backSprite.bitmap = new Bitmap(Graphics.boxWidth, Graphics.boxHeight);
+            this._backSprite.bitmap.fillAll('black');
+        }
         this.addChild(this._backSprite);
     };
 
-    Scene_Credits.prototype.createScrollContainer = function() {
-        this._scrollSprite = new Sprite();
-        this._scrollSprite.y = Graphics.boxHeight; 
-        this.addChild(this._scrollSprite);
+    Scene_Credits.prototype.createScrollWindow = function() {
+        // On crée une fenêtre standard qui prend tout l'écran
+        // 0, 0, Largeur, Hauteur
+        this._scrollWindow = new Window_Base(0, 0, Graphics.boxWidth, Graphics.boxHeight);
+        
+        // On la rend complètement invisible (pas de cadre, pas de fond dégradé)
+        this._scrollWindow.opacity = 0;
+        
+        // On retire le padding standard pour utiliser tout l'espace
+        this._scrollWindow.padding = 0;
+        this.addChild(this._scrollWindow);
     };
 
-    // --- CŒUR DE LA LOGIQUE MULTILINGUE ---
-    Scene_Credits.prototype.loadMarkdown = function() {
-        // 1. Détection de la langue cible
-        // On cherche d'abord la variable définie par le dev ($gameSystem.language)
-        // Sinon on prend la langue du navigateur/système
-        let targetLang = "";
+    Scene_Credits.prototype.playCreditsMusic = function() {
+        if (bgmName) {
+            AudioManager.playBgm({
+                name: bgmName,
+                volume: bgmVolume,
+                pitch: bgmPitch,
+                pan: 0
+            });
+        }
+    };
 
-        if (window.$gameSystem && $gameSystem.language) {
-            targetLang = $gameSystem.language;
-        } else {
-            targetLang = navigator.language || defaultLang;
+    // --- C'est ici que se trouve la logique de détection ---
+    Scene_Credits.prototype.loadCreditsText = function() {
+        var fs = require('fs');
+        var path = require('path');
+        
+        // 1. Initialisation de la variable langue
+        var currentLang = '';
+
+        // 2. Vérification de DKTools Localization
+        // On vérifie d'abord si l'objet DKTools existe pour éviter un crash
+        if (typeof DKTools !== 'undefined' && DKTools.Localization) {
+            currentLang = DKTools.Localization.locale;
+        } 
+        
+        // 3. Sinon, on vérifie votre ConfigManager personnalisé (si vous l'utilisez)
+        if (!currentLang && ConfigManager['language']) {
+            currentLang = ConfigManager['language'];
         }
 
-        // On nettoie le code (ex: "fr-FR" devient "fr")
-        targetLang = targetLang.substring(0, 2).toLowerCase();
+        // 4. Si toujours rien, on utilise la langue par défaut du plugin
+        if (!currentLang) {
+            currentLang = defaultLang;
+        }
 
-        // 2. Tentative de chargement du fichier spécifique
-        const url = 'data/credits/credits_' + targetLang + '.md';
-        this.tryLoadFile(url, true);
-    };
+        // Nettoyage : On ne garde que les 2 premiers caractères (ex: "fr-FR" -> "fr")
+        // .trim() retire les espaces potentiels
+        currentLang = String(currentLang).trim().substring(0, 2).toLowerCase();
 
-    Scene_Credits.prototype.tryLoadFile = function(url, isFirstTry) {
-        const xhr = new XMLHttpRequest();
-        xhr.open('GET', url);
-        xhr.overrideMimeType('text/plain');
-        
-        xhr.onload = () => {
-            if (xhr.status < 400) {
-                // Succès !
-                this.parseAndDraw(xhr.responseText);
-            } else {
-                // Fichier non trouvé (404)
-                if (isFirstTry) {
-                    console.warn("Fichier " + url + " introuvable. Chargement du défaut.");
-                    this.loadDefaultFile();
-                } else {
-                    this.onLoadError();
-                }
-            }
-        };
-        
-        xhr.onerror = () => {
-            if (isFirstTry) this.loadDefaultFile();
-            else this.onLoadError();
-        };
-        
-        xhr.send();
-    };
+        // 5. Construction du chemin
+        var baseDir = path.dirname(process.mainModule.filename);
+        var creditsDir = path.join(baseDir, 'data', 'credits');
+        var filePath = path.join(creditsDir, 'credits_' + currentLang + '.md');
 
-    Scene_Credits.prototype.loadDefaultFile = function() {
-        // On tente de charger la langue par défaut définie dans les paramètres du plugin
-        const url = 'data/credits/credits_' + defaultLang + '.md';
-        this.tryLoadFile(url, false);
-    };
+        // 6. Sécurité : si le fichier n'existe pas, on tente la langue par défaut
+        if (!fs.existsSync(filePath)) {
+            // Petite log pour le debug (touche F8)
+            console.warn("CreditsMarkdown: Fichier " + currentLang + " introuvable, chargement du défaut.");
+            filePath = path.join(creditsDir, 'credits_' + defaultLang + '.md');
+        }
 
-    Scene_Credits.prototype.onLoadError = function() {
-        console.error("Aucun fichier de crédits trouvé (ni langue, ni défaut).");
-        SceneManager.pop();
+        // Lecture et Affichage
+        if (fs.existsSync(filePath)) {
+            var text = fs.readFileSync(filePath, 'utf8');
+            this.parseAndDraw(text);
+        } else {
+            console.error("CreditsMarkdown: Aucun fichier de crédits trouvé dans " + creditsDir);
+            this.parseAndDraw("# ERREUR\nFichier de crédits manquant (vérifiez /data/credits/)."); 
+        }
     };
-    // --------------------------------------
 
     Scene_Credits.prototype.parseAndDraw = function(text) {
-        const lines = text.split('\n');
-        const lineHeight = 40;
-        const bitmapHeight = (lines.length * lineHeight) + Graphics.boxHeight;
-        this._scrollSprite.bitmap = new Bitmap(Graphics.boxWidth, bitmapHeight);
-        
-        lines.forEach((line, i) => {
-            let cleanLine = line.trim();
-            if (cleanLine === "") return;
+        // Utilisation de MarkdownLib
+        if (typeof MarkdownLib === 'undefined') {
+            this._scrollWindow.drawTextEx("Erreur : MarkdownLib.js manquant dans js/libs/ !", 0, Graphics.boxHeight);
+            return;
+        }
 
-            if (cleanLine.startsWith('# ')) {
-                this._scrollSprite.bitmap.textColor = '#ffff00'; 
-                this._scrollSprite.bitmap.fontSize = 38;
-                cleanLine = cleanLine.replace('# ', '');
-            } else if (cleanLine.startsWith('## ')) {
-                this._scrollSprite.bitmap.textColor = '#80ffff';
-                this._scrollSprite.bitmap.fontSize = 32;
-                cleanLine = cleanLine.replace('## ', '');
-            } else {
-                this._scrollSprite.bitmap.textColor = '#ffffff';
-                this._scrollSprite.bitmap.fontSize = 28;
-                cleanLine = cleanLine.replace(/\*\*/g, "");
-            }
+        const fullText = MarkdownLib.process(text, Graphics.boxWidth);
+        
+        // 2. Découpage ligne par ligne
+        const lines = fullText.split('\n');
+        const lineHeight = 36;
+        const totalHeight = (lines.length * lineHeight) + Graphics.boxHeight;
+        
+        this._scrollWindow.createContents();
+        this._scrollWindow.contents = new Bitmap(Graphics.boxWidth, totalHeight);
+
+        // 5. Dessin Ligne par Ligne
+        lines.forEach((line, i) => {
+            if (!line) return;
+            let textWidth = this._scrollWindow.drawTextEx(line, 0, -1000);
             
-            this._scrollSprite.bitmap.drawText(cleanLine, 0, i * lineHeight, Graphics.boxWidth, lineHeight, 'center');
+            // Calcul de la position X pour centrer
+            let x = (Graphics.boxWidth - textWidth) / 2;
+            
+            // Calcul de la position Y
+            // On ajoute Graphics.boxHeight pour que la 1ère ligne commence "sous" l'écran
+            let y = (i * lineHeight) + Graphics.boxHeight;
+
+            // Vrai dessin
+            this._scrollWindow.drawTextEx(line, x, y);
         });
 
         this._textLoaded = true;
@@ -248,30 +283,32 @@
 
     Scene_Credits.prototype.update = function() {
         Scene_Base.prototype.update.call(this);
+        
         if (this._textLoaded) {
-            this._scrollSprite.y -= scrollSpeed;
+            // Défilement via 'origin.y' (comme un ascenseur)
+            this._scrollWindow.origin.y += scrollSpeed;
             
-            // Calcul plus permissif : on s'arrête quand le BAS du bitmap 
-            // passe au-dessus du HAUT de l'écran.
-            if (this._scrollSprite.y < -this._scrollSprite.bitmap.height) {
+            // Condition de fin : 
+            // Quand le haut de la fenêtre (origin) a dépassé la hauteur totale du contenu
+            if (this._scrollWindow.origin.y >= this._scrollWindow.contents.height) {
                 this.terminateScene();
             }
 
-            // Sortie manuelle
+            // Sortie manuelle (Annuler / Toucher)
             if (Input.isTriggered('cancel') || TouchInput.isCancelled()) {
                 this.terminateScene();
             }
         }
     };
 
-    // Nouvelle fonction pour assurer une sortie propre
     Scene_Credits.prototype.terminateScene = function() {
-// On fait un fondu de la musique pour une transition propre
-        AudioManager.fadeOutBgm(1);		
-        SoundManager.playCancel(); // Petit feedback sonore
-		console.log("Fin du défilement détectée, retour à la scène précédente.");
-        SceneManager.pop();
+        AudioManager.fadeOutBgm(1);
+        SoundManager.playCancel();
+        console.log("Fin du défilement crédits.");
+        this.popScene(); // Retour à la scène précédente (Titre ou Map)
     };
 
+    // Exposition globale de la classe (optionnel, pour debug)
     window.Scene_Credits = Scene_Credits;
+
 })();
